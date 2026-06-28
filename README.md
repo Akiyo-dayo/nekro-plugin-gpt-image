@@ -1,79 +1,73 @@
-# Nekro Agent AI Image Plugin
+# Nekro Agent AI 生图插件
 
-A Nekro Agent plugin for generating and editing images, supporting multiple backends **simultaneously**:
+支持 **OpenAI / Gemini / Stable Diffusion** 多后端同时配置的 Nekro Agent 图片生成与编辑插件。
 
-- **OpenAI** (GPT Image, DALL·E, or any OpenAI-compatible endpoint)
-- **Gemini** (Google Gemini with native image generation)
-- **Stable Diffusion** (A1111 / Forge WebUI API)
+## 功能特性
 
-## Features
+- **多后端同时配置** — 三个后端各自独立模型组，可同时启用
+- **斜杠命令** — `/na-gpt`、`/na-gemini`、`/na-sd` 直接指定后端生图
+- **预设系统** — 文本预设（提示词模板）和图片预设（快速图生图参考图）
+- **WebUI 管理页面** — 可视化上传、管理和删除预设
+- **沙盒工具** — AI 可自动调用文生图、图片编辑、预设生图等功能
+- 文生图、单图编辑、多图参考编辑
 
-- **Multi-backend simultaneous configuration** — configure all three backends at once, switch via commands
-- **Slash commands**: `/na-gpt`, `/na-gemini`, `/na-sd` for direct image generation
-- **Preset system** — save image presets (for quick img2img) and text presets (prompt templates)
-- **WebUI API** — upload/manage presets from the Nekro Agent WebUI
-- **Sandbox tools** — AI can auto-call image generation, editing, and preset-based generation
-- Text-to-image generation
-- Single-image editing
-- Multi-image reference editing
+## 安装
 
-## Installation
+将本插件目录复制到 Nekro Agent 的插件包目录：
 
-Copy this plugin directory into your Nekro Agent plugin packages directory:
-
-```bash
+```
 plugins/packages/gpt_image
 ```
 
-Then restart Nekro Agent or reload plugins from the plugin manager.
+然后重启 Nekro Agent 或在插件管理器中重新加载。
 
-## Configuration
+## 配置
 
-Each backend has its own model group, so you can configure all three simultaneously.
+每个后端拥有独立的模型组配置，可以同时启用所有后端。
 
-### Backend Settings
+### 后端配置
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `DEFAULT_BACKEND` | Default backend for AI auto-calls: `openai`, `gemini`, or `sd_webui` | `openai` |
-| `OPENAI_MODEL_GROUP` | Model group for OpenAI backend | `""` |
-| `OPENAI_MODEL_NAME` | OpenAI model name | `gpt-image-1` |
-| `GEMINI_MODEL_GROUP` | Model group for Gemini backend | `""` |
-| `GEMINI_MODEL_NAME` | Gemini model name | `gemini-2.0-flash-preview-image-generation` |
-| `SD_MODEL_GROUP` | Model group for SD WebUI backend | `""` |
-| `SD_MODEL_NAME` | SD checkpoint override (empty = use current) | `""` |
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `DEFAULT_BACKEND` | AI 自动调用时的默认后端 | `openai` |
+| `OPENAI_MODEL_GROUP` | OpenAI 后端的模型组 | 空（禁用） |
+| `OPENAI_MODEL_NAME` | OpenAI 模型名 | `gpt-image-1` |
+| `GEMINI_MODEL_GROUP` | Gemini 后端的模型组 | 空（禁用） |
+| `GEMINI_MODEL_NAME` | Gemini 模型名 | `gemini-2.0-flash-preview-image-generation` |
+| `SD_MODEL_GROUP` | SD WebUI 后端的模型组 | 空（禁用） |
+| `SD_MODEL_NAME` | SD 模型覆盖（留空使用当前模型） | 空 |
 
-### Common Settings
+### 通用配置
 
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `DEFAULT_SIZE` | Image size: `auto` or `WIDTHxHEIGHT` | `1024x1024` |
-| `OUTPUT_FORMAT` | Output format: `png`, `jpeg`, or `webp` | `png` |
-| `OUTPUT_COMPRESSION` | JPEG/WebP quality (1–100) | `100` |
-| `TIMEOUT_SECONDS` | HTTP timeout | `300` |
-| `MAX_REFERENCE_IMAGES` | Max reference images for multi-edit | `5` |
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `DEFAULT_SIZE` | 默认图片尺寸 | `1024x1024` |
+| `OUTPUT_FORMAT` | 输出格式：`png`/`jpeg`/`webp` | `png` |
+| `OUTPUT_COMPRESSION` | JPEG/WebP 压缩质量（1-100） | `100` |
+| `TIMEOUT_SECONDS` | HTTP 超时秒数 | `300` |
+| `MAX_REFERENCE_IMAGES` | 多图编辑最大参考图数 | `5` |
 
-### OpenAI-only Settings
+### OpenAI 专属配置
 
-| Setting | Default |
-|---------|---------|
+| 配置项 | 默认值 |
+|--------|--------|
 | `DEFAULT_QUALITY` | `auto` |
 | `DEFAULT_BACKGROUND` | `auto` |
 | `MODERATION` | `auto` |
 
-### Stable Diffusion Settings
+### Stable Diffusion 专属配置
 
-| Setting | Default |
-|---------|---------|
-| `SD_NEGATIVE_PROMPT` | `""` |
+| 配置项 | 默认值 |
+|--------|--------|
+| `SD_NEGATIVE_PROMPT` | 空 |
 | `SD_STEPS` | `20` |
 | `SD_CFG_SCALE` | `7.0` |
 | `SD_SAMPLER` | `Euler a` |
 | `SD_DENOISING_STRENGTH` | `0.75` |
 
-### Example Model Group Configurations
+### 模型组配置示例
 
-**OpenAI / compatible API:**
+**OpenAI / 兼容 API：**
 ```yaml
 MODEL_GROUPS:
   openai_image:
@@ -82,7 +76,7 @@ MODEL_GROUPS:
     CHAT_MODEL: "gpt-image-1"
 ```
 
-**Google Gemini:**
+**Google Gemini：**
 ```yaml
 MODEL_GROUPS:
   gemini_image:
@@ -91,7 +85,7 @@ MODEL_GROUPS:
     CHAT_MODEL: "gemini-2.0-flash-preview-image-generation"
 ```
 
-**Stable Diffusion WebUI (local):**
+**Stable Diffusion WebUI（本地）：**
 ```yaml
 MODEL_GROUPS:
   sd_local:
@@ -99,70 +93,66 @@ MODEL_GROUPS:
     API_KEY: ""
 ```
 
-## Slash Commands
+## 斜杠命令
 
-| Command | Description |
-|---------|-------------|
-| `/na-gpt <prompt>` | Generate image using OpenAI backend |
-| `/na-gemini <prompt>` | Generate image using Gemini backend |
-| `/na-sd <prompt>` | Generate image using SD WebUI backend |
-| `/na-preset.list` | List all saved presets |
-| `/na-preset.add-text <name> <template>` | Add a text preset (use `{input}` as placeholder) |
-| `/na-preset.delete <name>` | Delete a preset |
+| 命令 | 说明 |
+|------|------|
+| `/na-gpt <提示词>` | 使用 OpenAI 后端生图 |
+| `/na-gemini <提示词>` | 使用 Gemini 后端生图 |
+| `/na-sd <提示词>` | 使用 SD WebUI 后端生图 |
+| `/na-preset.list` | 列出所有已保存的预设 |
+| `/na-preset.add-text <名称> <模板>` | 添加文本预设 |
+| `/na-preset.delete <名称>` | 删除预设 |
 
-Aliases: `gpt画图`, `gemini画图`, `sd画图`
+别名：`gpt画图`、`gemini画图`、`sd画图`
 
-## Preset System
+## 预设系统
 
-### Text Presets
+### 文本预设
 
-Text presets are prompt templates with an optional `{input}` placeholder:
+文本预设是提示词模板，支持 `{input}` 占位符：
 
 ```
 /na-preset.add-text 动漫风 将以下内容画成动漫风格: {input}
 ```
 
-Then use it: `/na-gpt 动漫风` (if the prompt matches a preset name, the template is used).
+当命令的提示词匹配到预设名时，自动使用模板生成。
 
-### Image Presets
+### 图片预设
 
-Image presets store a reference image for quick img2img. Upload via the WebUI API:
+图片预设存储一张参考图片，用于快速图生图。通过 **WebUI 管理页面**上传。
+
+### WebUI 管理页面
+
+插件提供可视化管理页面，访问地址：
 
 ```
-POST /plugins/{plugin_key}/presets/image
-  - name: preset name
-  - file: image file upload
-  - description: optional description
-  - default_prompt: optional default prompt
-  - default_backend: optional backend override
+http://<你的NA地址>/plugins/<插件key>/manage
 ```
 
-### WebUI API Endpoints
+在管理页面中可以：
+- 📝 创建和管理文本预设（提示词模板、负面提示词、默认后端等）
+- 🖼️ 上传和管理图片预设（拖拽上传参考图、设置默认提示词）
+- 🗑️ 删除不需要的预设
+- 查看当前已启用的后端和默认后端
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/presets` | List all presets |
-| `POST` | `/presets/text` | Create text preset |
-| `POST` | `/presets/image` | Upload image preset |
-| `DELETE` | `/presets/{type}/{name}` | Delete a preset |
-| `GET` | `/presets/image/{name}/preview` | Preview image preset |
-| `GET` | `/backends` | List available backends |
+## AI 可调用的沙盒工具
 
-## Tools Exposed to the Agent
+| 工具名 | 说明 |
+|--------|------|
+| `AI 文生图` | 从文字提示生成图片（使用默认后端） |
+| `AI 单图编辑` | 编辑一张图片 |
+| `AI 多图参考编辑` | 使用多张参考图生成或编辑图片 |
+| `AI 预设生图` | 使用已保存的预设快速生成图片 |
 
-- `AI 文生图` — Generate an image from a text prompt (uses default backend)
-- `AI 单图编辑` — Edit one image with a text prompt
-- `AI 多图参考编辑` — Create or edit using multiple reference images
-- `AI 预设生图` — Generate using a saved preset
-
-## Running Tests
+## 运行测试
 
 ```bash
 cd tests
 python -m pytest test_units.py -v
 ```
 
-## Notes
+## 说明
 
-- The `module_name` remains `gpt_image` for backward compatibility.
-- This repository contains only the plugin source code.
+- `module_name` 保持 `gpt_image` 以向后兼容已有安装。
+- 本仓库仅包含插件源代码，不包含运行时配置、数据和密钥文件。

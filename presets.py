@@ -1,10 +1,10 @@
 """预设管理模块
 
 管理图片预设（用于快速图生图）和文本预设（提示词模板）。
-预设以 JSON 文件存储在插件数据目录下。
+预设以 JSON 文件存储在插件数据目录下，文件名使用名称的 SHA-256 哈希值以避免文件名过长。
 """
 
-import json
+import hashlib
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,8 +36,15 @@ class TextPreset(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
 
+def _safe_filename(name: str) -> str:
+    """将预设名称转换为安全的文件名（SHA-256 哈希，固定 64 字符）。"""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+
 class PresetStore:
     """预设持久化管理器"""
+
+    MAX_PRESET_NAME_LENGTH = 100
 
     def __init__(self, data_dir: Path):
         self._data_dir = data_dir
@@ -47,10 +54,15 @@ class PresetStore:
         self._text_dir.mkdir(parents=True, exist_ok=True)
 
     def _image_path(self, name: str) -> Path:
-        return self._image_dir / f"{name}.json"
+        return self._image_dir / f"{_safe_filename(name)}.json"
 
     def _text_path(self, name: str) -> Path:
-        return self._text_dir / f"{name}.json"
+        return self._text_dir / f"{_safe_filename(name)}.json"
+
+    @classmethod
+    def is_valid_preset_name(cls, name: str) -> bool:
+        """检查名称是否可能是预设名（长度合理）。"""
+        return 0 < len(name.strip()) <= cls.MAX_PRESET_NAME_LENGTH
 
     # -- Image presets --
 
@@ -59,6 +71,8 @@ class PresetStore:
         path.write_text(preset.model_dump_json(indent=2), encoding="utf-8")
 
     def get_image_preset(self, name: str) -> Optional[ImagePreset]:
+        if not self.is_valid_preset_name(name):
+            return None
         path = self._image_path(name)
         if not path.exists():
             return None
@@ -82,6 +96,8 @@ class PresetStore:
         return results
 
     def delete_image_preset(self, name: str) -> bool:
+        if not self.is_valid_preset_name(name):
+            return False
         path = self._image_path(name)
         if path.exists():
             path.unlink()
@@ -95,6 +111,8 @@ class PresetStore:
         path.write_text(preset.model_dump_json(indent=2), encoding="utf-8")
 
     def get_text_preset(self, name: str) -> Optional[TextPreset]:
+        if not self.is_valid_preset_name(name):
+            return None
         path = self._text_path(name)
         if not path.exists():
             return None
@@ -118,6 +136,8 @@ class PresetStore:
         return results
 
     def delete_text_preset(self, name: str) -> bool:
+        if not self.is_valid_preset_name(name):
+            return False
         path = self._text_path(name)
         if path.exists():
             path.unlink()

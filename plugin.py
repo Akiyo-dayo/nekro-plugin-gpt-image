@@ -834,9 +834,17 @@ async def cmd_preset_delete(
 @plugin.mount_router()
 def create_router():
     from fastapi import APIRouter, File, Form, UploadFile
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
 
     router = APIRouter()
+
+    # -- WebUI 管理页面 --
+    @router.get("/manage", response_class=HTMLResponse)
+    async def manage_page():
+        html_path = Path(__file__).parent / "webui.html"
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+    # -- JSON API --
 
     @router.get("/presets")
     async def list_presets():
@@ -913,7 +921,6 @@ def create_router():
 
     @router.get("/presets/image/{name}/preview")
     async def preview_image_preset(name: str):
-        from fastapi.responses import Response
         store = _get_preset_store()
         preset = store.get_image_preset(name)
         if not preset:

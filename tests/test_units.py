@@ -207,7 +207,20 @@ class TestSDPayloads:
 # ---------------------------------------------------------------------------
 # presets.py tests
 # ---------------------------------------------------------------------------
-from presets import ImagePreset, TextPreset, PresetStore
+from presets import ImagePreset, TextPreset, PresetStore, _safe_filename
+
+
+class TestSafeFilename:
+    def test_deterministic(self):
+        assert _safe_filename("hello") == _safe_filename("hello")
+
+    def test_different_names(self):
+        assert _safe_filename("a") != _safe_filename("b")
+
+    def test_length(self):
+        long_name = "x" * 5000
+        result = _safe_filename(long_name)
+        assert len(result) == 64  # SHA-256 hex digest
 
 
 class TestPresetStore:
@@ -262,6 +275,32 @@ class TestPresetStore:
         store.save_text_preset(p2)
         loaded = store.get_text_preset("t")
         assert loaded.prompt_template == "v2"
+
+    def test_long_name_returns_none(self, store):
+        """超长名称不应尝试文件操作，直接返回 None。"""
+        long_name = "这是一段超级长的中文提示词" * 100
+        assert store.get_text_preset(long_name) is None
+        assert store.get_image_preset(long_name) is None
+        assert store.delete_text_preset(long_name) is False
+        assert store.delete_image_preset(long_name) is False
+
+    def test_is_valid_preset_name(self):
+        assert PresetStore.is_valid_preset_name("anime") is True
+        assert PresetStore.is_valid_preset_name("") is False
+        assert PresetStore.is_valid_preset_name("   ") is False
+        assert PresetStore.is_valid_preset_name("x" * 100) is True
+        assert PresetStore.is_valid_preset_name("x" * 101) is False
+
+    def test_filenames_are_hashed(self, store, tmp_path):
+        """确认文件名是哈希值而非原始名称。"""
+        preset = TextPreset(name="测试中文名", prompt_template="test")
+        store.save_text_preset(preset)
+        text_dir = tmp_path / "presets" / "texts"
+        files = list(text_dir.glob("*.json"))
+        assert len(files) == 1
+        filename = files[0].stem
+        assert filename != "测试中文名"
+        assert len(filename) == 64  # SHA-256
 
 
 if __name__ == "__main__":

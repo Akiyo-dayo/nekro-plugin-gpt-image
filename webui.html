@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 生图预设管理</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; color: #333; padding: 20px; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .subtitle { color: #666; font-size: 13px; margin-bottom: 20px; }
+  .backends { background: #e8f5e9; border-radius: 8px; padding: 12px 16px; margin-bottom: 20px; font-size: 13px; }
+  .backends strong { color: #2e7d32; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab { padding: 8px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; background: #e0e0e0; transition: all .2s; }
+  .tab.active { background: #1976d2; color: #fff; }
+  .section { display: none; }
+  .section.active { display: block; }
+  .card { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 20px; margin-bottom: 16px; }
+  .card h3 { font-size: 16px; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+  .form-row { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .form-row label { font-size: 13px; color: #555; display: block; margin-bottom: 4px; }
+  .form-row .field { flex: 1; min-width: 200px; }
+  .form-row .field.full { flex-basis: 100%; }
+  input[type="text"], textarea, select { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+  textarea { resize: vertical; min-height: 60px; }
+  input[type="file"] { font-size: 13px; }
+  .btn { padding: 8px 24px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; transition: all .2s; }
+  .btn-primary { background: #1976d2; color: #fff; }
+  .btn-primary:hover { background: #1565c0; }
+  .btn-danger { background: #e53935; color: #fff; font-size: 12px; padding: 4px 12px; }
+  .btn-danger:hover { background: #c62828; }
+  .preset-list { margin-top: 12px; }
+  .preset-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #fafafa; border-radius: 8px; margin-bottom: 8px; border: 1px solid #eee; }
+  .preset-info { flex: 1; }
+  .preset-name { font-weight: 600; font-size: 14px; }
+  .preset-desc { font-size: 12px; color: #888; margin-top: 2px; }
+  .preset-meta { font-size: 11px; color: #aaa; margin-top: 2px; }
+  .preset-thumb { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; margin-right: 12px; background: #eee; }
+  .toast { position: fixed; top: 20px; right: 20px; padding: 12px 24px; border-radius: 8px; color: #fff; font-size: 14px; z-index: 999; opacity: 0; transition: opacity .3s; }
+  .toast.show { opacity: 1; }
+  .toast.ok { background: #43a047; }
+  .toast.err { background: #e53935; }
+  .empty { text-align: center; color: #aaa; padding: 30px; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<h1>🎨 AI 生图预设管理</h1>
+<p class="subtitle">管理文本预设和图片预设，配合 /na-gpt、/na-gemini、/na-sd 命令使用</p>
+
+<div class="backends" id="backendsInfo">加载中...</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('text')">📝 文本预设</button>
+  <button class="tab" onclick="switchTab('image')">🖼️ 图片预设</button>
+</div>
+
+<!-- 文本预设 -->
+<div class="section active" id="sec-text">
+  <div class="card">
+    <h3>新建文本预设</h3>
+    <div class="form-row">
+      <div class="field"><label>预设名称</label><input type="text" id="t-name" placeholder="如：动漫风"></div>
+      <div class="field"><label>默认后端</label>
+        <select id="t-backend"><option value="">跟随默认</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="sd_webui">SD WebUI</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field full"><label>提示词模板（用 {input} 作为用户输入占位符）</label><textarea id="t-prompt" placeholder="将以下内容画成动漫风格: {input}"></textarea></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label>负面提示词（SD 专用）</label><input type="text" id="t-neg" placeholder="可选"></div>
+      <div class="field"><label>默认尺寸</label><input type="text" id="t-size" placeholder="如 1024x1024，留空跟随全局"></div>
+      <div class="field"><label>描述</label><input type="text" id="t-desc" placeholder="可选说明"></div>
+    </div>
+    <button class="btn btn-primary" onclick="addTextPreset()">保存文本预设</button>
+  </div>
+  <div id="text-list" class="preset-list"></div>
+</div>
+
+<!-- 图片预设 -->
+<div class="section" id="sec-image">
+  <div class="card">
+    <h3>上传图片预设</h3>
+    <div class="form-row">
+      <div class="field"><label>预设名称</label><input type="text" id="i-name" placeholder="如：参考猫"></div>
+      <div class="field"><label>默认后端</label>
+        <select id="i-backend"><option value="">跟随默认</option><option value="openai">OpenAI</option><option value="gemini">Gemini</option><option value="sd_webui">SD WebUI</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label>上传图片</label><input type="file" id="i-file" accept="image/*"></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label>默认提示词</label><input type="text" id="i-prompt" placeholder="基于参考图生成的默认提示"></div>
+      <div class="field"><label>默认尺寸</label><input type="text" id="i-size" placeholder="如 1024x1024"></div>
+      <div class="field"><label>描述</label><input type="text" id="i-desc" placeholder="可选说明"></div>
+    </div>
+    <button class="btn btn-primary" onclick="addImagePreset()">上传图片预设</button>
+  </div>
+  <div id="image-list" class="preset-list"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const BASE = window.location.pathname.replace(/\/manage\/?$/, '');
+
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'ok' : 'err');
+  setTimeout(() => t.className = 'toast', 2500);
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach((b, i) => b.classList.toggle('active', (tab === 'text' ? i === 0 : i === 1)));
+  document.getElementById('sec-text').classList.toggle('active', tab === 'text');
+  document.getElementById('sec-image').classList.toggle('active', tab === 'image');
+}
+
+async function loadPresets() {
+  try {
+    const r = await fetch(BASE + '/presets');
+    const d = await r.json();
+    renderTextPresets(d.text_presets || []);
+    renderImagePresets(d.image_presets || []);
+    const br = await fetch(BASE + '/backends');
+    const bd = await br.json();
+    const avail = (bd.available || []).map(b => ({openai:'OpenAI',gemini:'Gemini',sd_webui:'SD WebUI'}[b]||b)).join('、');
+    document.getElementById('backendsInfo').innerHTML = '<strong>已启用后端：</strong>' + (avail || '无') + '　｜　<strong>默认后端：</strong>' + (bd.default || '未设置');
+  } catch(e) { toast('加载预设失败: ' + e.message, false); }
+}
+
+function renderTextPresets(list) {
+  const el = document.getElementById('text-list');
+  if (!list.length) { el.innerHTML = '<div class="empty">暂无文本预设</div>'; return; }
+  el.innerHTML = list.map(p => `
+    <div class="preset-item">
+      <div class="preset-info">
+        <div class="preset-name">${esc(p.name)}</div>
+        <div class="preset-desc">${esc(p.description || p.prompt_template)}</div>
+        <div class="preset-meta">${p.default_backend ? '后端: '+p.default_backend : ''}${p.negative_prompt ? ' | 负面: '+p.negative_prompt.slice(0,30) : ''}</div>
+      </div>
+      <button class="btn btn-danger" onclick="delPreset('text','${esc(p.name)}')">删除</button>
+    </div>`).join('');
+}
+
+function renderImagePresets(list) {
+  const el = document.getElementById('image-list');
+  if (!list.length) { el.innerHTML = '<div class="empty">暂无图片预设，点击上方上传</div>'; return; }
+  el.innerHTML = list.map(p => `
+    <div class="preset-item">
+      <img class="preset-thumb" src="${BASE}/presets/image/${encodeURIComponent(p.name)}/preview" alt="">
+      <div class="preset-info">
+        <div class="preset-name">${esc(p.name)}</div>
+        <div class="preset-desc">${esc(p.description || p.default_prompt || '无描述')}</div>
+        <div class="preset-meta">${p.default_backend ? '后端: '+p.default_backend : ''}</div>
+      </div>
+      <button class="btn btn-danger" onclick="delPreset('image','${esc(p.name)}')">删除</button>
+    </div>`).join('');
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s||''; return d.innerHTML; }
+
+async function addTextPreset() {
+  const name = document.getElementById('t-name').value.trim();
+  const prompt = document.getElementById('t-prompt').value.trim();
+  if (!name || !prompt) { toast('名称和提示词模板不能为空', false); return; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('prompt_template', prompt);
+  fd.append('description', document.getElementById('t-desc').value.trim());
+  fd.append('negative_prompt', document.getElementById('t-neg').value.trim());
+  fd.append('default_size', document.getElementById('t-size').value.trim());
+  fd.append('default_backend', document.getElementById('t-backend').value);
+  try {
+    const r = await fetch(BASE + '/presets/text', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.status === 'ok') { toast('文本预设已保存', true); document.getElementById('t-name').value=''; document.getElementById('t-prompt').value=''; loadPresets(); }
+    else toast(d.message || '保存失败', false);
+  } catch(e) { toast('请求失败: ' + e.message, false); }
+}
+
+async function addImagePreset() {
+  const name = document.getElementById('i-name').value.trim();
+  const file = document.getElementById('i-file').files[0];
+  if (!name) { toast('名称不能为空', false); return; }
+  if (!file) { toast('请选择图片文件', false); return; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('file', file);
+  fd.append('description', document.getElementById('i-desc').value.trim());
+  fd.append('default_prompt', document.getElementById('i-prompt').value.trim());
+  fd.append('default_size', document.getElementById('i-size').value.trim());
+  fd.append('default_backend', document.getElementById('i-backend').value);
+  try {
+    const r = await fetch(BASE + '/presets/image', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.status === 'ok') { toast('图片预设已上传', true); document.getElementById('i-name').value=''; document.getElementById('i-file').value=''; loadPresets(); }
+    else toast(d.message || '上传失败', false);
+  } catch(e) { toast('请求失败: ' + e.message, false); }
+}
+
+async function delPreset(type, name) {
+  if (!confirm('确定删除预设 "' + name + '"？')) return;
+  try {
+    const r = await fetch(BASE + '/presets/' + type + '/' + encodeURIComponent(name), { method: 'DELETE' });
+    const d = await r.json();
+    if (d.status === 'ok') { toast('已删除', true); loadPresets(); }
+    else toast(d.message || '删除失败', false);
+  } catch(e) { toast('请求失败: ' + e.message, false); }
+}
+
+loadPresets();
+</script>
+</body>
+</html>
