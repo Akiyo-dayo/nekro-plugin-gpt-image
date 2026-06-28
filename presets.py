@@ -143,3 +143,9 @@ class PresetStore:
             path.unlink()
             return True
         return False
+
+    def find_presets(self, name: str) -> tuple[Optional[TextPreset], Optional[ImagePreset]]:
+        """按名称查找文本/图片预设；长 prompt 会直接跳过，避免构造超长路径。"""
+        if not self.is_valid_preset_name(name):
+            return None, None
+        return self.get_text_preset(name), self.get_image_preset(name)

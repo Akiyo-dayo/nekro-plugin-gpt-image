@@ -655,8 +655,7 @@ async def _cmd_generate(context: CommandExecutionContext, backend: str, prompt: 
         return CmdCtl.failed(str(exc))
 
     store = _get_preset_store()
-    text_preset = store.get_text_preset(prompt.strip())
-    image_preset = store.get_image_preset(prompt.strip())
+    text_preset, image_preset = store.find_presets(prompt.strip())
 
     actual_prompt = prompt.strip()
     negative_prompt = ""

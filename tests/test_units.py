@@ -302,6 +302,22 @@ class TestPresetStore:
         assert filename != "测试中文名"
         assert len(filename) == 64  # SHA-256
 
+    def test_find_presets_skips_filesystem_for_long_prompt(self, tmp_path):
+        """长提示词不应触发任何预设文件路径访问。"""
+
+        class ExplodingPathStore(PresetStore):
+            def _text_path(self, name: str) -> Path:
+                raise AssertionError("text preset path should not be touched")
+
+            def _image_path(self, name: str) -> Path:
+                raise AssertionError("image preset path should not be touched")
+
+        store = ExplodingPathStore(tmp_path)
+        long_prompt = "这是一段很长的画图提示词" * 100
+        text_preset, image_preset = store.find_presets(long_prompt)
+        assert text_preset is None
+        assert image_preset is None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
