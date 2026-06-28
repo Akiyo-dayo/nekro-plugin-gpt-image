@@ -1,6 +1,7 @@
 """Tests for client.py and presets.py — covers pure logic that can run without nekro_agent."""
 
 import base64
+import ast
 import json
 import tempfile
 import shutil
@@ -317,6 +318,37 @@ class TestPresetStore:
         text_preset, image_preset = store.find_presets(long_prompt)
         assert text_preset is None
         assert image_preset is None
+
+
+class TestCommandImagePresetRouting:
+    def test_image_preset_branch_uses_edit_pipeline(self):
+        """图片预设分支必须走图生图/编辑链路，而不是纯文生图。"""
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        tree = ast.parse(plugin_path.read_text(encoding="utf-8"))
+        cmd_generate = next(
+            node for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_cmd_generate"
+        )
+
+        image_preset_branch = None
+        for node in ast.walk(cmd_generate):
+            if (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.BoolOp)
+                and any(isinstance(value, ast.Name) and value.id == "image_preset" for value in node.test.values)
+            ):
+                image_preset_branch = node
+                break
+
+        assert image_preset_branch is not None
+        call_names = [
+            call.func.id
+            for statement in image_preset_branch.body
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        ]
+        assert "_edit_preset_raw_image" in call_names
+        assert "_generate_raw_image" not in call_names
 
 
 if __name__ == "__main__":

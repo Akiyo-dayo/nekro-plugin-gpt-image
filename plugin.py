@@ -451,6 +451,93 @@ async def _edit_raw_image(
         )
     raise ValueError(f"不支持的后端: {backend}")
 
+
+async def _edit_preset_raw_image(
+    *,
+    backend: str,
+    prompt: str,
+    image_preset: ImagePreset,
+    size: str,
+    quality: str,
+    background: str,
+    output_format: str,
+    output_compression: int,
+    moderation: str,
+    negative_prompt: str = "",
+) -> str:
+    """Use an uploaded image preset as the reference image for command generation."""
+    image_bytes = base64.b64decode(image_preset.image_b64)
+
+    if backend == BACKEND_OPENAI:
+        mg = _get_backend_model_group(BACKEND_OPENAI)
+        normalized_size = normalize_size(size)
+        fmt = normalize_output_format(output_format)
+        fields: Dict[str, Any] = {
+            "model": _get_model_name(BACKEND_OPENAI, mg),
+            "prompt": prompt,
+            "n": 1,
+            "output_format": fmt,
+        }
+        if normalized_size != "auto":
+            fields["size"] = normalized_size
+        if quality != "auto":
+            fields["quality"] = quality
+        if background != "auto":
+            fields["background"] = background
+        if moderation != "auto":
+            fields["moderation"] = moderation
+        if fmt in {"jpeg", "webp"} and output_compression < 100:
+            fields["output_compression"] = output_compression
+        data = await post_edit(
+            base_url=mg.BASE_URL,
+            api_key=mg.API_KEY,
+            fields=fields,
+            files=make_edit_files([(image_preset.mime_type, image_preset.name, image_bytes)]),
+            timeout_seconds=config.TIMEOUT_SECONDS,
+        )
+        return decode_image_response(data, output_format=fmt)
+
+    if backend == BACKEND_GEMINI:
+        mg = _get_backend_model_group(BACKEND_GEMINI)
+        payload = build_gemini_generation_payload(
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            output_format=output_format,
+            reference_images=[(image_preset.mime_type, image_bytes)],
+        )
+        data = await post_gemini_generation(
+            base_url=mg.BASE_URL,
+            api_key=mg.API_KEY,
+            model=_get_model_name(BACKEND_GEMINI, mg),
+            payload=payload,
+            timeout_seconds=config.TIMEOUT_SECONDS,
+        )
+        return decode_gemini_response(data, output_format=output_format)
+
+    if backend == BACKEND_SD:
+        mg = _get_backend_model_group(BACKEND_SD)
+        payload = build_sd_img2img_payload(
+            prompt=prompt,
+            negative_prompt=negative_prompt or config.SD_NEGATIVE_PROMPT,
+            init_images_b64=[base64.b64encode(image_bytes).decode()],
+            size=size,
+            steps=config.SD_STEPS,
+            cfg_scale=config.SD_CFG_SCALE,
+            denoising_strength=config.SD_DENOISING_STRENGTH,
+            sampler_name=config.SD_SAMPLER,
+            sd_model=_get_model_name(BACKEND_SD, mg),
+        )
+        data = await post_sd_img2img(
+            base_url=mg.BASE_URL,
+            api_key=getattr(mg, "API_KEY", ""),
+            payload=payload,
+            timeout_seconds=config.TIMEOUT_SECONDS,
+        )
+        return decode_sd_response(data, output_format=output_format)
+
+    raise ValueError(f"不支持的后端: {backend}")
+
 # ---------------------------------------------------------------------------
 # Sandbox methods (AI auto-call)
 # ---------------------------------------------------------------------------
@@ -671,10 +758,9 @@ async def _cmd_generate(context: CommandExecutionContext, backend: str, prompt: 
 
     try:
         if image_preset and not text_preset:
-            data_uri = f"data:{image_preset.mime_type};base64,{image_preset.image_b64}"
-            fmt = normalize_output_format(config.OUTPUT_FORMAT)
-            image_data = await _generate_raw_image(
+            image_data = await _edit_preset_raw_image(
                 backend=backend, prompt=actual_prompt,
+                image_preset=image_preset,
                 size=size, quality=config.DEFAULT_QUALITY,
                 background=config.DEFAULT_BACKGROUND,
                 output_format=config.OUTPUT_FORMAT,
