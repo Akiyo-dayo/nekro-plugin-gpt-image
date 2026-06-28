@@ -2,9 +2,10 @@ from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional
 
 import base64
+from contextvars import ContextVar
 import aiofiles
 import magic
-from httpx import HTTPStatusError, RequestError
+from httpx import AsyncClient, HTTPStatusError, RequestError, Timeout
 from pydantic import Field
 
 from nekro_agent.api import i18n
@@ -157,6 +158,10 @@ config: GPTImageConfig = plugin.get_config(GPTImageConfig)
 
 # Lazy-initialized preset store
 _preset_store: Optional[PresetStore] = None
+_current_command_message: ContextVar[Optional[Mapping[str, Any]]] = ContextVar(
+    "gpt_image_current_command_message",
+    default=None,
+)
 
 
 def _get_preset_store() -> PresetStore:
@@ -164,6 +169,40 @@ def _get_preset_store() -> PresetStore:
     if _preset_store is None:
         _preset_store = PresetStore(plugin.get_plugin_data_dir())
     return _preset_store
+
+
+def _install_command_message_context_patch() -> None:
+    """Expose the currently consumed command message to slash command handlers."""
+    try:
+        from nekro_agent.adapters.interface import collector
+    except Exception as exc:
+        logger.debug(f"Skip command message context patch: {exc}")
+        return
+
+    original = getattr(collector, "_try_handle_command", None)
+    if not original:
+        return
+    if getattr(original, "__gpt_image_context_wrapped__", False):
+        original = getattr(original, "__gpt_image_original__", original)
+
+    async def _wrapped_try_handle_command(adapter, chat_key, platform_user, platform_message, content_text):
+        token = _current_command_message.set({
+            "chat_key": chat_key,
+            "user_id": getattr(platform_user, "user_id", ""),
+            "platform_message": platform_message,
+            "content_text": content_text,
+        })
+        try:
+            return await original(adapter, chat_key, platform_user, platform_message, content_text)
+        finally:
+            _current_command_message.reset(token)
+
+    setattr(_wrapped_try_handle_command, "__gpt_image_context_wrapped__", True)
+    setattr(_wrapped_try_handle_command, "__gpt_image_original__", original)
+    collector._try_handle_command = _wrapped_try_handle_command
+
+
+_install_command_message_context_patch()
 
 # ---------------------------------------------------------------------------
 # Model group helpers
@@ -250,6 +289,185 @@ async def _reference_image_from_path(
     if not mime_type.startswith("image/"):
         raise ValueError(f"{image_path} 不是可用图片文件")
     return mime_type, name_hint or host_path.name, image_bytes
+
+
+async def _reference_image_from_local_path(local_path: str, *, name_hint: str) -> tuple[str, str, bytes]:
+    path_text = (local_path or "").strip()
+    if path_text.startswith("file:"):
+        path_text = path_text[len("file:"):]
+    if not path_text:
+        raise ValueError("reference image local_path is empty")
+
+    host_path = Path(path_text)
+    async with aiofiles.open(host_path, "rb") as file:
+        image_bytes = await file.read()
+    mime_type = magic.from_buffer(image_bytes, mime=True) or "application/octet-stream"
+    if not mime_type.startswith("image/"):
+        raise ValueError(f"{host_path} is not an image")
+    return mime_type, name_hint or host_path.name, image_bytes
+
+
+async def _reference_image_from_url(remote_url: str, *, name_hint: str) -> tuple[str, str, bytes]:
+    url = (remote_url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("reference image remote_url is not http(s)")
+
+    async with AsyncClient(timeout=Timeout(read=config.TIMEOUT_SECONDS, write=30, connect=10, pool=10)) as client:
+        response = await client.get(url)
+    response.raise_for_status()
+    image_bytes = response.content
+    mime_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+    if not mime_type:
+        mime_type = magic.from_buffer(image_bytes, mime=True) or "application/octet-stream"
+    if not mime_type.startswith("image/"):
+        raise ValueError(f"{url} is not an image")
+    return mime_type, name_hint or Path(url.split("?", 1)[0]).name or "reference", image_bytes
+
+
+def _is_image_segment(segment: Any) -> bool:
+    segment_type = getattr(segment, "type", "")
+    if hasattr(segment_type, "value"):
+        segment_type = segment_type.value
+    return str(segment_type) == "image" or segment.__class__.__name__ == "ChatMessageSegmentImage"
+
+
+def _message_ref_id(message: Any) -> str:
+    ext_data_obj = getattr(message, "ext_data_obj", None)
+    if ext_data_obj is not None:
+        ref_msg_id = getattr(ext_data_obj, "ref_msg_id", "")
+        if ref_msg_id:
+            return str(ref_msg_id)
+
+    ext_data = getattr(message, "ext_data", None)
+    if isinstance(ext_data, Mapping):
+        return str(ext_data.get("ref_msg_id") or "")
+    ref_msg_id = getattr(ext_data, "ref_msg_id", "")
+    return str(ref_msg_id or "")
+
+
+async def _extract_reference_images_from_message(message: Any) -> List[tuple[str, str, bytes]]:
+    content_data = getattr(message, "content_data", None) or []
+    if isinstance(content_data, str):
+        try:
+            content_data = message.parse_content_data()
+        except Exception:
+            content_data = []
+
+    image_items: List[tuple[str, str, bytes]] = []
+    for index, segment in enumerate(content_data, 1):
+        if not _is_image_segment(segment):
+            continue
+        name_hint = str(getattr(segment, "file_name", "") or f"reference_{index}")
+        local_path = str(getattr(segment, "local_path", "") or "").strip()
+        remote_url = str(getattr(segment, "remote_url", "") or "").strip()
+
+        if local_path:
+            try:
+                image_items.append(await _reference_image_from_local_path(local_path, name_hint=name_hint))
+                continue
+            except Exception as exc:
+                logger.warning(f"Failed to read command reference image local_path={local_path}: {exc}")
+
+        if remote_url:
+            try:
+                image_items.append(await _reference_image_from_url(remote_url, name_hint=name_hint))
+            except Exception as exc:
+                logger.warning(f"Failed to fetch command reference image remote_url={remote_url}: {exc}")
+
+    return image_items
+
+
+async def _referenced_db_message(context: CommandExecutionContext, ref_msg_id: str) -> Any:
+    if not ref_msg_id:
+        return None
+    try:
+        from nekro_agent.models.db_chat_message import DBChatMessage
+    except Exception as exc:
+        logger.debug(f"DBChatMessage unavailable for command reference lookup: {exc}")
+        return None
+
+    try:
+        return await DBChatMessage.filter(
+            chat_key=context.chat_key,
+            message_id=str(ref_msg_id),
+        ).order_by("-id").first()
+    except Exception as exc:
+        logger.warning(f"Failed to query referenced message {ref_msg_id}: {exc}")
+        return None
+
+
+async def _recent_command_db_message(context: CommandExecutionContext, backend: str, prompt: str) -> Any:
+    try:
+        from nekro_agent.models.db_chat_message import DBChatMessage
+    except Exception as exc:
+        logger.debug(f"DBChatMessage unavailable for recent command lookup: {exc}")
+        return None
+
+    command_names = {
+        BACKEND_OPENAI: ("na-gpt",),
+        BACKEND_GEMINI: ("na-gemini",),
+        BACKEND_SD: ("na-sd",),
+    }.get(backend, ())
+    prompt_text = (prompt or "").strip()
+    try:
+        messages = await DBChatMessage.filter(chat_key=context.chat_key).order_by("-id").limit(20)
+    except Exception as exc:
+        logger.warning(f"Failed to query recent command messages: {exc}")
+        return None
+
+    same_user_messages = [
+        message for message in messages
+        if str(getattr(message, "sender_id", "")) == str(context.user_id)
+        or str(getattr(message, "platform_userid", "")) == str(context.user_id)
+    ]
+    for message in same_user_messages:
+        text = str(getattr(message, "content_text", "") or "")
+        if any(name in text for name in command_names):
+            return message
+    if prompt_text:
+        for message in same_user_messages:
+            text = str(getattr(message, "content_text", "") or "")
+            if prompt_text in text:
+                return message
+    return None
+
+
+def _dedupe_image_items(image_items: List[tuple[str, str, bytes]]) -> List[tuple[str, str, bytes]]:
+    seen: set[tuple[str, int]] = set()
+    unique: List[tuple[str, str, bytes]] = []
+    for mime_type, name_hint, image_bytes in image_items:
+        key = (name_hint, len(image_bytes))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((mime_type, name_hint, image_bytes))
+    return unique[:config.MAX_REFERENCE_IMAGES]
+
+
+async def _find_command_reference_images(
+    context: CommandExecutionContext,
+    backend: str,
+    prompt: str,
+) -> List[tuple[str, str, bytes]]:
+    """Find images attached to the command message or to its replied message."""
+    image_items: List[tuple[str, str, bytes]] = []
+    current = _current_command_message.get()
+    command_message = None
+
+    if current and current.get("chat_key") == context.chat_key and str(current.get("user_id")) == str(context.user_id):
+        command_message = current.get("platform_message")
+    if command_message is None:
+        command_message = await _recent_command_db_message(context, backend, prompt)
+
+    if command_message is not None:
+        image_items.extend(await _extract_reference_images_from_message(command_message))
+        ref_msg_id = _message_ref_id(command_message)
+        if ref_msg_id:
+            ref_message = await _referenced_db_message(context, ref_msg_id)
+            if ref_message is not None:
+                image_items.extend(await _extract_reference_images_from_message(ref_message))
+
+    return _dedupe_image_items(image_items)
 
 
 async def _forward_result(_ctx: AgentCtx, image_data: str, output_format: str) -> str:
@@ -450,6 +668,96 @@ async def _edit_raw_image(
             size=size, output_format=output_format, negative_prompt=negative_prompt,
         )
     raise ValueError(f"不支持的后端: {backend}")
+
+
+async def _edit_reference_raw_images(
+    *,
+    backend: str,
+    prompt: str,
+    reference_images: List[tuple[str, str, bytes]],
+    size: str,
+    quality: str,
+    background: str,
+    output_format: str,
+    output_compression: int,
+    moderation: str,
+    negative_prompt: str = "",
+) -> str:
+    """Use raw reference image bytes for slash command generation."""
+    if not reference_images:
+        raise ValueError("at least one reference image is required")
+    if len(reference_images) > config.MAX_REFERENCE_IMAGES:
+        raise ValueError(f"at most {config.MAX_REFERENCE_IMAGES} reference images are supported")
+
+    if backend == BACKEND_OPENAI:
+        mg = _get_backend_model_group(BACKEND_OPENAI)
+        normalized_size = normalize_size(size)
+        fmt = normalize_output_format(output_format)
+        fields: Dict[str, Any] = {
+            "model": _get_model_name(BACKEND_OPENAI, mg),
+            "prompt": prompt,
+            "n": 1,
+            "output_format": fmt,
+        }
+        if normalized_size != "auto":
+            fields["size"] = normalized_size
+        if quality != "auto":
+            fields["quality"] = quality
+        if background != "auto":
+            fields["background"] = background
+        if moderation != "auto":
+            fields["moderation"] = moderation
+        if fmt in {"jpeg", "webp"} and output_compression < 100:
+            fields["output_compression"] = output_compression
+        data = await post_edit(
+            base_url=mg.BASE_URL,
+            api_key=mg.API_KEY,
+            fields=fields,
+            files=make_edit_files(reference_images),
+            timeout_seconds=config.TIMEOUT_SECONDS,
+        )
+        return decode_image_response(data, output_format=fmt)
+
+    if backend == BACKEND_GEMINI:
+        mg = _get_backend_model_group(BACKEND_GEMINI)
+        payload = build_gemini_generation_payload(
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            output_format=output_format,
+            reference_images=[(mime_type, image_bytes) for mime_type, _, image_bytes in reference_images],
+        )
+        data = await post_gemini_generation(
+            base_url=mg.BASE_URL,
+            api_key=mg.API_KEY,
+            model=_get_model_name(BACKEND_GEMINI, mg),
+            payload=payload,
+            timeout_seconds=config.TIMEOUT_SECONDS,
+        )
+        return decode_gemini_response(data, output_format=output_format)
+
+    if backend == BACKEND_SD:
+        mg = _get_backend_model_group(BACKEND_SD)
+        payload = build_sd_img2img_payload(
+            prompt=prompt,
+            negative_prompt=negative_prompt or config.SD_NEGATIVE_PROMPT,
+            init_images_b64=[base64.b64encode(image_bytes).decode() for _, _, image_bytes in reference_images],
+            size=size,
+            steps=config.SD_STEPS,
+            cfg_scale=config.SD_CFG_SCALE,
+            denoising_strength=config.SD_DENOISING_STRENGTH,
+            sampler_name=config.SD_SAMPLER,
+            sd_model=_get_model_name(BACKEND_SD, mg),
+        )
+        data = await post_sd_img2img(
+            base_url=mg.BASE_URL,
+            api_key=getattr(mg, "API_KEY", ""),
+            payload=payload,
+            timeout_seconds=config.TIMEOUT_SECONDS,
+        )
+        return decode_sd_response(data, output_format=output_format)
+
+    raise ValueError(f"涓嶆敮鎸佺殑鍚庣: {backend}")
 
 
 async def _edit_preset_raw_image(
@@ -743,6 +1051,7 @@ async def _cmd_generate(context: CommandExecutionContext, backend: str, prompt: 
 
     store = _get_preset_store()
     text_preset, image_preset = store.find_presets(prompt.strip())
+    command_reference_images = await _find_command_reference_images(context, backend, prompt)
 
     actual_prompt = prompt.strip()
     negative_prompt = ""
@@ -761,6 +1070,20 @@ async def _cmd_generate(context: CommandExecutionContext, backend: str, prompt: 
             image_data = await _edit_preset_raw_image(
                 backend=backend, prompt=actual_prompt,
                 image_preset=image_preset,
+                size=size, quality=config.DEFAULT_QUALITY,
+                background=config.DEFAULT_BACKGROUND,
+                output_format=config.OUTPUT_FORMAT,
+                output_compression=config.OUTPUT_COMPRESSION,
+                moderation=config.MODERATION,
+                negative_prompt=negative_prompt,
+            )
+        elif command_reference_images:
+            logger.info(
+                f"{_label(backend)} slash command uses {len(command_reference_images)} reference image(s)",
+            )
+            image_data = await _edit_reference_raw_images(
+                backend=backend, prompt=actual_prompt,
+                reference_images=command_reference_images,
                 size=size, quality=config.DEFAULT_QUALITY,
                 background=config.DEFAULT_BACKGROUND,
                 output_format=config.OUTPUT_FORMAT,

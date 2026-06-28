@@ -350,6 +350,56 @@ class TestCommandImagePresetRouting:
         assert "_edit_preset_raw_image" in call_names
         assert "_generate_raw_image" not in call_names
 
+    def test_command_generation_discovers_message_reference_images(self):
+        """斜杠命令应主动从命令消息/回复消息中查找参考图。"""
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        tree = ast.parse(plugin_path.read_text(encoding="utf-8"))
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                child.parent = parent
+
+        cmd_generate = next(
+            node for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_cmd_generate"
+        )
+
+        awaited_calls = [
+            call.func.id
+            for call in ast.walk(cmd_generate)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and isinstance(getattr(call, "parent", None), ast.Await)
+        ]
+        assert "_find_command_reference_images" in awaited_calls
+
+    def test_command_reference_images_use_edit_pipeline_before_generation(self):
+        """命令携带/回复图片时必须先走图生图/编辑链路，而不是纯文生图。"""
+        plugin_path = Path(__file__).resolve().parent.parent / "plugin.py"
+        tree = ast.parse(plugin_path.read_text(encoding="utf-8"))
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                child.parent = parent
+
+        cmd_generate = next(
+            node for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_cmd_generate"
+        )
+
+        ref_branch = None
+        for node in ast.walk(cmd_generate):
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "command_reference_images":
+                ref_branch = node
+                break
+
+        assert ref_branch is not None
+        call_names = [
+            call.func.id
+            for statement in ref_branch.body
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        ]
+        assert "_edit_reference_raw_images" in call_names
+        assert "_generate_raw_image" not in call_names
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
