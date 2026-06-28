@@ -1,13 +1,21 @@
-# Nekro Agent GPT Image Plugin
+# Nekro Agent AI Image Plugin
 
-A Nekro Agent plugin for generating and editing images with OpenAI-compatible Images API endpoints.
+A Nekro Agent plugin for generating and editing images, supporting multiple backends **simultaneously**:
+
+- **OpenAI** (GPT Image, DALL·E, or any OpenAI-compatible endpoint)
+- **Gemini** (Google Gemini with native image generation)
+- **Stable Diffusion** (A1111 / Forge WebUI API)
 
 ## Features
 
+- **Multi-backend simultaneous configuration** — configure all three backends at once, switch via commands
+- **Slash commands**: `/na-gpt`, `/na-gemini`, `/na-sd` for direct image generation
+- **Preset system** — save image presets (for quick img2img) and text presets (prompt templates)
+- **WebUI API** — upload/manage presets from the Nekro Agent WebUI
+- **Sandbox tools** — AI can auto-call image generation, editing, and preset-based generation
 - Text-to-image generation
 - Single-image editing
 - Multi-image reference editing
-- Configurable model, size, quality, background, output format, moderation, and timeout
 
 ## Installation
 
@@ -17,44 +25,144 @@ Copy this plugin directory into your Nekro Agent plugin packages directory:
 plugins/packages/gpt_image
 ```
 
-Then restart Nekro Agent or reload plugins from the Nekro Agent plugin manager.
+Then restart Nekro Agent or reload plugins from the plugin manager.
 
 ## Configuration
 
-Configure the plugin in Nekro Agent after installation.
+Each backend has its own model group, so you can configure all three simultaneously.
 
-Required:
+### Backend Settings
 
-- `MODEL_GROUP`: a Nekro Agent model group that provides an OpenAI-compatible `BASE_URL` and `API_KEY`
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `DEFAULT_BACKEND` | Default backend for AI auto-calls: `openai`, `gemini`, or `sd_webui` | `openai` |
+| `OPENAI_MODEL_GROUP` | Model group for OpenAI backend | `""` |
+| `OPENAI_MODEL_NAME` | OpenAI model name | `gpt-image-1` |
+| `GEMINI_MODEL_GROUP` | Model group for Gemini backend | `""` |
+| `GEMINI_MODEL_NAME` | Gemini model name | `gemini-2.0-flash-preview-image-generation` |
+| `SD_MODEL_GROUP` | Model group for SD WebUI backend | `""` |
+| `SD_MODEL_NAME` | SD checkpoint override (empty = use current) | `""` |
 
-Optional defaults:
+### Common Settings
 
-- `MODEL_NAME`: image model name, for example `gpt-image-1.5`
-- `DEFAULT_SIZE`: `auto`, `1024x1024`, `1536x1024`, `1024x1536`, etc.
-- `DEFAULT_QUALITY`: `auto`, `low`, `medium`, or `high`
-- `DEFAULT_BACKGROUND`: `auto`, `transparent`, or `opaque`
-- `OUTPUT_FORMAT`: `png`, `jpeg`, or `webp`
-- `OUTPUT_COMPRESSION`: JPEG/WebP compression quality from `1` to `100`
-- `MODERATION`: `auto` or `low`
-- `TIMEOUT_SECONDS`: request timeout in seconds
-- `MAX_REFERENCE_IMAGES`: maximum number of reference images for multi-image editing
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `DEFAULT_SIZE` | Image size: `auto` or `WIDTHxHEIGHT` | `1024x1024` |
+| `OUTPUT_FORMAT` | Output format: `png`, `jpeg`, or `webp` | `png` |
+| `OUTPUT_COMPRESSION` | JPEG/WebP quality (1–100) | `100` |
+| `TIMEOUT_SECONDS` | HTTP timeout | `300` |
+| `MAX_REFERENCE_IMAGES` | Max reference images for multi-edit | `5` |
 
-Example model group values should be configured in Nekro Agent itself. Do not commit real API keys:
+### OpenAI-only Settings
 
+| Setting | Default |
+|---------|---------|
+| `DEFAULT_QUALITY` | `auto` |
+| `DEFAULT_BACKGROUND` | `auto` |
+| `MODERATION` | `auto` |
+
+### Stable Diffusion Settings
+
+| Setting | Default |
+|---------|---------|
+| `SD_NEGATIVE_PROMPT` | `""` |
+| `SD_STEPS` | `20` |
+| `SD_CFG_SCALE` | `7.0` |
+| `SD_SAMPLER` | `Euler a` |
+| `SD_DENOISING_STRENGTH` | `0.75` |
+
+### Example Model Group Configurations
+
+**OpenAI / compatible API:**
 ```yaml
 MODEL_GROUPS:
-  image_api:
-    BASE_URL: "https://api.example.com/v1"
-    API_KEY: "${IMAGE_API_KEY}"
-    CHAT_MODEL: "gpt-image-1.5"
+  openai_image:
+    BASE_URL: "https://api.openai.com/v1"
+    API_KEY: "${OPENAI_API_KEY}"
+    CHAT_MODEL: "gpt-image-1"
 ```
 
-## Tools exposed to the agent
+**Google Gemini:**
+```yaml
+MODEL_GROUPS:
+  gemini_image:
+    BASE_URL: "https://generativelanguage.googleapis.com/v1beta"
+    API_KEY: "${GEMINI_API_KEY}"
+    CHAT_MODEL: "gemini-2.0-flash-preview-image-generation"
+```
 
-- `GPT 文生图`: generate an image from a prompt
-- `GPT 单图编辑`: edit one image with a prompt
-- `GPT 多图参考编辑`: create or edit an image using multiple reference images
+**Stable Diffusion WebUI (local):**
+```yaml
+MODEL_GROUPS:
+  sd_local:
+    BASE_URL: "http://127.0.0.1:7860"
+    API_KEY: ""
+```
+
+## Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/na-gpt <prompt>` | Generate image using OpenAI backend |
+| `/na-gemini <prompt>` | Generate image using Gemini backend |
+| `/na-sd <prompt>` | Generate image using SD WebUI backend |
+| `/na-preset.list` | List all saved presets |
+| `/na-preset.add-text <name> <template>` | Add a text preset (use `{input}` as placeholder) |
+| `/na-preset.delete <name>` | Delete a preset |
+
+Aliases: `gpt画图`, `gemini画图`, `sd画图`
+
+## Preset System
+
+### Text Presets
+
+Text presets are prompt templates with an optional `{input}` placeholder:
+
+```
+/na-preset.add-text 动漫风 将以下内容画成动漫风格: {input}
+```
+
+Then use it: `/na-gpt 动漫风` (if the prompt matches a preset name, the template is used).
+
+### Image Presets
+
+Image presets store a reference image for quick img2img. Upload via the WebUI API:
+
+```
+POST /plugins/{plugin_key}/presets/image
+  - name: preset name
+  - file: image file upload
+  - description: optional description
+  - default_prompt: optional default prompt
+  - default_backend: optional backend override
+```
+
+### WebUI API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/presets` | List all presets |
+| `POST` | `/presets/text` | Create text preset |
+| `POST` | `/presets/image` | Upload image preset |
+| `DELETE` | `/presets/{type}/{name}` | Delete a preset |
+| `GET` | `/presets/image/{name}/preview` | Preview image preset |
+| `GET` | `/backends` | List available backends |
+
+## Tools Exposed to the Agent
+
+- `AI 文生图` — Generate an image from a text prompt (uses default backend)
+- `AI 单图编辑` — Edit one image with a text prompt
+- `AI 多图参考编辑` — Create or edit using multiple reference images
+- `AI 预设生图` — Generate using a saved preset
+
+## Running Tests
+
+```bash
+cd tests
+python -m pytest test_units.py -v
+```
 
 ## Notes
 
-This repository contains only the plugin source code. Runtime config files, plugin data, caches, logs, and private credentials are intentionally excluded.
+- The `module_name` remains `gpt_image` for backward compatibility.
+- This repository contains only the plugin source code.

@@ -1,0 +1,268 @@
+"""Tests for client.py and presets.py — covers pure logic that can run without nekro_agent."""
+
+import base64
+import json
+import tempfile
+import shutil
+from pathlib import Path
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# client.py tests
+# ---------------------------------------------------------------------------
+from client import (
+    OpenAIImageAPIError,
+    GeminiImageAPIError,
+    SDImageAPIError,
+    normalize_size,
+    normalize_output_format,
+    image_file_name,
+    build_generation_payload,
+    decode_image_response,
+    decode_data_uri,
+    extension_from_mime,
+    build_prompt_with_references,
+    make_edit_files,
+    build_gemini_generation_payload,
+    decode_gemini_response,
+    build_sd_txt2img_payload,
+    build_sd_img2img_payload,
+    decode_sd_response,
+)
+
+
+class TestNormalizeSize:
+    def test_auto(self):
+        assert normalize_size("auto") == "auto"
+        assert normalize_size("") == "auto"
+        assert normalize_size("  AUTO  ") == "auto"
+
+    def test_valid_sizes(self):
+        assert normalize_size("1024x1024") == "1024x1024"
+        assert normalize_size("512x768") == "512x768"
+
+    def test_invalid(self):
+        with pytest.raises(ValueError):
+            normalize_size("big")
+        with pytest.raises(ValueError):
+            normalize_size("1024")
+
+
+class TestNormalizeOutputFormat:
+    def test_valid(self):
+        assert normalize_output_format("png") == "png"
+        assert normalize_output_format("JPEG") == "jpeg"
+        assert normalize_output_format("  WebP  ") == "webp"
+
+    def test_default(self):
+        assert normalize_output_format("") == "png"
+
+    def test_invalid(self):
+        with pytest.raises(ValueError):
+            normalize_output_format("bmp")
+
+
+class TestImageFileName:
+    def test_names(self):
+        assert image_file_name("png") == "ai-image.png"
+        assert image_file_name("jpeg") == "ai-image.jpeg"
+
+
+class TestBuildGenerationPayload:
+    def test_minimal(self):
+        p = build_generation_payload(
+            model="m", prompt="test", size="auto", quality="auto",
+            background="auto", output_format="png",
+            output_compression=100, moderation="auto",
+        )
+        assert p["model"] == "m"
+        assert p["prompt"] == "test"
+        assert "size" not in p
+        assert "quality" not in p
+
+    def test_with_options(self):
+        p = build_generation_payload(
+            model="m", prompt="t", size="512x512", quality="high",
+            background="transparent", output_format="jpeg",
+            output_compression=80, moderation="low",
+        )
+        assert p["size"] == "512x512"
+        assert p["quality"] == "high"
+        assert p["output_compression"] == 80
+
+
+class TestDecodeImageResponse:
+    def test_b64(self):
+        b64 = base64.b64encode(b"fake").decode()
+        data = {"data": [{"b64_json": b64}]}
+        result = decode_image_response(data, output_format="png")
+        assert result.startswith("data:image/png;base64,")
+
+    def test_url(self):
+        data = {"data": [{"url": "https://example.com/img.png"}]}
+        result = decode_image_response(data, output_format="png")
+        assert result == "https://example.com/img.png"
+
+    def test_empty_raises(self):
+        with pytest.raises(OpenAIImageAPIError):
+            decode_image_response({"data": []}, output_format="png")
+
+
+class TestDecodeDataUri:
+    def test_valid(self):
+        b64 = base64.b64encode(b"hello").decode()
+        uri = f"data:image/png;base64,{b64}"
+        mime, data = decode_data_uri(uri)
+        assert mime == "image/png"
+        assert data == b"hello"
+
+    def test_invalid(self):
+        with pytest.raises(ValueError):
+            decode_data_uri("not a data uri")
+
+
+class TestBuildPromptWithReferences:
+    def test_basic(self):
+        refs = [{"description": "cat"}, {"description": "dog", "weight": 2.0}]
+        prompt = build_prompt_with_references(
+            target_prompt="merge", references=refs, size="1024x1024",
+        )
+        assert "cat" in prompt
+        assert "dog" in prompt
+        assert "importance: 2" in prompt
+
+
+class TestMakeEditFiles:
+    def test_creates_files(self):
+        items = [("image/png", "test", b"data")]
+        files = make_edit_files(items)
+        assert len(files) == 1
+        assert files[0][0] == "image"
+        assert files[0][1][2] == "image/png"
+
+
+class TestGeminiPayload:
+    def test_text_only(self):
+        p = build_gemini_generation_payload(
+            prompt="hello", size="auto", quality="auto", output_format="png",
+        )
+        assert p["contents"][0]["parts"][-1]["text"] == "hello"
+        assert "IMAGE" in p["generationConfig"]["responseModalities"]
+
+    def test_with_refs(self):
+        p = build_gemini_generation_payload(
+            prompt="test", size="512x512", quality="high", output_format="jpeg",
+            reference_images=[("image/png", b"fake")],
+        )
+        assert len(p["contents"][0]["parts"]) == 2
+        assert "inlineData" in p["contents"][0]["parts"][0]
+
+
+class TestDecodeGeminiResponse:
+    def test_valid(self):
+        b64 = base64.b64encode(b"img").decode()
+        data = {"candidates": [{"content": {"parts": [
+            {"inlineData": {"data": b64, "mimeType": "image/png"}}
+        ]}}]}
+        result = decode_gemini_response(data, output_format="png")
+        assert result.startswith("data:image/png;base64,")
+
+    def test_empty_raises(self):
+        with pytest.raises(GeminiImageAPIError):
+            decode_gemini_response({"candidates": []}, output_format="png")
+
+
+class TestSDPayloads:
+    def test_txt2img(self):
+        p = build_sd_txt2img_payload(
+            prompt="cat", size="512x512", steps=10, cfg_scale=7.0,
+        )
+        assert p["prompt"] == "cat"
+        assert p["width"] == 512
+        assert p["steps"] == 10
+
+    def test_txt2img_auto_size(self):
+        p = build_sd_txt2img_payload(prompt="cat", size="auto")
+        assert p["width"] == 512
+        assert p["height"] == 512
+
+    def test_img2img(self):
+        p = build_sd_img2img_payload(
+            prompt="cat", init_images_b64=["abc"], size="768x768",
+        )
+        assert p["init_images"] == ["abc"]
+        assert p["width"] == 768
+
+    def test_decode_sd_response(self):
+        b64 = base64.b64encode(b"img").decode()
+        result = decode_sd_response({"images": [b64]}, output_format="png")
+        assert result.startswith("data:image/png;base64,")
+
+    def test_decode_sd_empty(self):
+        with pytest.raises(SDImageAPIError):
+            decode_sd_response({"images": []}, output_format="png")
+
+
+# ---------------------------------------------------------------------------
+# presets.py tests
+# ---------------------------------------------------------------------------
+from presets import ImagePreset, TextPreset, PresetStore
+
+
+class TestPresetStore:
+    @pytest.fixture
+    def store(self, tmp_path):
+        return PresetStore(tmp_path)
+
+    def test_text_preset_crud(self, store):
+        preset = TextPreset(
+            name="anime", prompt_template="draw {input} in anime style",
+            description="Anime style",
+        )
+        store.save_text_preset(preset)
+        loaded = store.get_text_preset("anime")
+        assert loaded is not None
+        assert loaded.prompt_template == "draw {input} in anime style"
+
+        items = store.list_text_presets()
+        assert len(items) == 1
+        assert items[0]["name"] == "anime"
+
+        assert store.delete_text_preset("anime") is True
+        assert store.get_text_preset("anime") is None
+        assert store.delete_text_preset("anime") is False
+
+    def test_image_preset_crud(self, store):
+        b64 = base64.b64encode(b"fake_image_data").decode()
+        preset = ImagePreset(
+            name="ref_cat", image_b64=b64, mime_type="image/png",
+            default_prompt="a cute cat", description="Cat reference",
+        )
+        store.save_image_preset(preset)
+        loaded = store.get_image_preset("ref_cat")
+        assert loaded is not None
+        assert loaded.image_b64 == b64
+
+        items = store.list_image_presets()
+        assert len(items) == 1
+        assert items[0]["name"] == "ref_cat"
+
+        assert store.delete_image_preset("ref_cat") is True
+        assert store.get_image_preset("ref_cat") is None
+
+    def test_missing_preset(self, store):
+        assert store.get_text_preset("nope") is None
+        assert store.get_image_preset("nope") is None
+
+    def test_overwrite_preset(self, store):
+        p1 = TextPreset(name="t", prompt_template="v1")
+        store.save_text_preset(p1)
+        p2 = TextPreset(name="t", prompt_template="v2")
+        store.save_text_preset(p2)
+        loaded = store.get_text_preset("t")
+        assert loaded.prompt_template == "v2"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

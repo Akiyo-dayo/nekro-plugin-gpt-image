@@ -1,6 +1,6 @@
 import base64
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from httpx import AsyncClient, Timeout
 
@@ -8,6 +8,16 @@ from httpx import AsyncClient, Timeout
 class OpenAIImageAPIError(RuntimeError):
     """Raised when the image API response does not contain a usable image."""
 
+
+class GeminiImageAPIError(RuntimeError):
+    """Raised when the Gemini image API response does not contain a usable image."""
+
+
+class SDImageAPIError(RuntimeError):
+    """Raised when the Stable Diffusion API response does not contain a usable image."""
+
+
+ImageAPIError = (OpenAIImageAPIError, GeminiImageAPIError, SDImageAPIError)
 
 _SIZE_PATTERN = re.compile(r"^\d{2,5}x\d{2,5}$")
 _OUTPUT_FORMATS = {"png", "jpeg", "webp"}
@@ -34,8 +44,12 @@ def normalize_output_format(output_format: str) -> str:
 
 
 def image_file_name(output_format: str) -> str:
-    return f"gpt-image.{normalize_output_format(output_format)}"
+    return f"ai-image.{normalize_output_format(output_format)}"
 
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible backend
+# ---------------------------------------------------------------------------
 
 def build_generation_payload(
     *,
@@ -84,7 +98,7 @@ def decode_image_response(data: Mapping[str, Any], *, output_format: str) -> str
         if isinstance(image_url, str) and image_url.strip():
             return image_url.strip()
 
-    raise OpenAIImageAPIError("No image was returned by the GPT image API")
+    raise OpenAIImageAPIError("No image was returned by the image API")
 
 
 def decode_data_uri(data_uri: str) -> Tuple[str, bytes]:
@@ -171,6 +185,243 @@ async def post_edit(
             },
             data={key: str(value) for key, value in fields.items()},
             files=files,
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+# ---------------------------------------------------------------------------
+# Gemini backend
+# ---------------------------------------------------------------------------
+
+def _gemini_size_config(size: str) -> Optional[Dict[str, int]]:
+    """Convert WIDTHxHEIGHT to Gemini aspectRatio or personalization config."""
+    normalized = normalize_size(size)
+    if normalized == "auto":
+        return None
+    parts = normalized.split("x")
+    return {"width": int(parts[0]), "height": int(parts[1])}
+
+
+def build_gemini_generation_payload(
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    output_format: str,
+    reference_images: Optional[List[Tuple[str, bytes]]] = None,
+) -> Dict[str, Any]:
+    """Build a Gemini generateContent request with responseModalities including image."""
+    contents_parts: List[Dict[str, Any]] = []
+
+    if reference_images:
+        for mime_type, img_bytes in reference_images:
+            contents_parts.append({
+                "inlineData": {
+                    "mimeType": mime_type,
+                    "data": base64.b64encode(img_bytes).decode(),
+                }
+            })
+
+    contents_parts.append({"text": prompt})
+
+    payload: Dict[str, Any] = {
+        "contents": [{"parts": contents_parts}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+        },
+    }
+
+    fmt = normalize_output_format(output_format)
+    mime_map = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}
+    payload["generationConfig"]["responseMimeType"] = mime_map.get(fmt, "image/png")
+
+    size_cfg = _gemini_size_config(size)
+    if size_cfg:
+        payload["generationConfig"]["imageSize"] = size_cfg
+
+    return payload
+
+
+def decode_gemini_response(data: Mapping[str, Any], *, output_format: str) -> str:
+    """Extract base64 image from Gemini generateContent response."""
+    candidates = data.get("candidates", [])
+    for candidate in candidates:
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        for part in parts:
+            inline = part.get("inlineData", {})
+            b64_data = inline.get("data", "")
+            mime_type = inline.get("mimeType", "")
+            if b64_data and mime_type.startswith("image/"):
+                return f"data:{mime_type};base64,{b64_data}"
+
+    raise GeminiImageAPIError("No image was returned by the Gemini API")
+
+
+async def post_gemini_generation(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    payload: Mapping[str, Any],
+    timeout_seconds: int,
+) -> Mapping[str, Any]:
+    """Send a generateContent request to Gemini API."""
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
+
+    async with AsyncClient(timeout=Timeout(read=timeout_seconds, write=timeout_seconds, connect=10, pool=10)) as client:
+        response = await client.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+            },
+            params={"key": api_key},
+            json=dict(payload),
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+# ---------------------------------------------------------------------------
+# Stable Diffusion WebUI (A1111 / Forge) backend
+# ---------------------------------------------------------------------------
+
+def build_sd_txt2img_payload(
+    *,
+    prompt: str,
+    negative_prompt: str = "",
+    size: str,
+    steps: int = 20,
+    cfg_scale: float = 7.0,
+    sampler_name: str = "Euler a",
+    sd_model: str = "",
+) -> Dict[str, Any]:
+    """Build an SD WebUI /sdapi/v1/txt2img payload."""
+    normalized = normalize_size(size)
+    if normalized == "auto":
+        width, height = 512, 512
+    else:
+        parts = normalized.split("x")
+        width, height = int(parts[0]), int(parts[1])
+
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "sampler_name": sampler_name,
+        "n_iter": 1,
+        "batch_size": 1,
+    }
+
+    if sd_model:
+        payload["override_settings"] = {"sd_model_checkpoint": sd_model}
+
+    return payload
+
+
+def build_sd_img2img_payload(
+    *,
+    prompt: str,
+    negative_prompt: str = "",
+    init_images_b64: List[str],
+    size: str,
+    steps: int = 20,
+    cfg_scale: float = 7.0,
+    denoising_strength: float = 0.75,
+    sampler_name: str = "Euler a",
+    sd_model: str = "",
+) -> Dict[str, Any]:
+    """Build an SD WebUI /sdapi/v1/img2img payload."""
+    normalized = normalize_size(size)
+    if normalized == "auto":
+        width, height = 512, 512
+    else:
+        parts = normalized.split("x")
+        width, height = int(parts[0]), int(parts[1])
+
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "init_images": init_images_b64,
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": cfg_scale,
+        "denoising_strength": denoising_strength,
+        "sampler_name": sampler_name,
+        "n_iter": 1,
+        "batch_size": 1,
+    }
+
+    if sd_model:
+        payload["override_settings"] = {"sd_model_checkpoint": sd_model}
+
+    return payload
+
+
+def decode_sd_response(data: Mapping[str, Any], *, output_format: str) -> str:
+    """Extract the first image from SD WebUI response."""
+    images = data.get("images", [])
+    if not images:
+        raise SDImageAPIError("No image was returned by the Stable Diffusion API")
+
+    b64_data = images[0]
+    if isinstance(b64_data, str) and b64_data.strip():
+        fmt = normalize_output_format(output_format)
+        return f"data:image/{fmt};base64,{b64_data.strip()}"
+
+    raise SDImageAPIError("Invalid image data returned by the Stable Diffusion API")
+
+
+async def post_sd_txt2img(
+    *,
+    base_url: str,
+    api_key: str,
+    payload: Mapping[str, Any],
+    timeout_seconds: int,
+) -> Mapping[str, Any]:
+    """Send a txt2img request to SD WebUI API."""
+    headers: Dict[str, str] = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with AsyncClient(timeout=Timeout(read=timeout_seconds, write=timeout_seconds, connect=10, pool=10)) as client:
+        response = await client.post(
+            f"{base_url.rstrip('/')}/sdapi/v1/txt2img",
+            headers=headers,
+            json=dict(payload),
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+async def post_sd_img2img(
+    *,
+    base_url: str,
+    api_key: str,
+    payload: Mapping[str, Any],
+    timeout_seconds: int,
+) -> Mapping[str, Any]:
+    """Send an img2img request to SD WebUI API."""
+    headers: Dict[str, str] = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with AsyncClient(timeout=Timeout(read=timeout_seconds, write=timeout_seconds, connect=10, pool=10)) as client:
+        response = await client.post(
+            f"{base_url.rstrip('/')}/sdapi/v1/img2img",
+            headers=headers,
+            json=dict(payload),
         )
     response.raise_for_status()
     return response.json()
